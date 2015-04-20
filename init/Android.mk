@@ -4,7 +4,7 @@
 # code that are surrounded by "DOLBY..." are copyrighted and
 # licensed separately, as follows:
 #
-#  (C) 2012 Dolby Laboratories, Inc.
+#  (C) 2011-2013 Dolby Laboratories, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,8 @@ LOCAL_SRC_FILES:= \
 	init_parser.c \
 	ueventd.c \
 	ueventd_parser.c \
-	watchdogd.c
+	watchdogd.c \
+	vendor_init.c
 
 LOCAL_CFLAGS    += -Wno-unused-parameter
 
@@ -57,6 +58,12 @@ endif
 ifeq ($(strip $(TARGET_USE_MOT_NEW_COM)),true)
 LOCAL_CFLAGS    += -DMOTO_NEW_CHARGE_ONLY_MODE
 endif
+ifdef DOLBY_UDC
+  LOCAL_CFLAGS += -DDOLBY_UDC
+endif #DOLBY_UDC_END
+ifdef DOLBY_DAP
+LOCAL_CFLAGS += -DDOLBY_DAP
+endif #DOLBY_END
 
 # Enable ueventd logging
 #LOCAL_CFLAGS += -DLOG_UEVENTS=1
@@ -90,6 +97,12 @@ LOCAL_STATIC_LIBRARIES := \
 	libz
 
 LOCAL_ADDITIONAL_DEPENDENCIES += $(LOCAL_PATH)/Android.mk
+ifneq ($(strip $(TARGET_PLATFORM_DEVICE_BASE)),)
+LOCAL_CFLAGS += -D_PLATFORM_BASE="\"$(TARGET_PLATFORM_DEVICE_BASE)\""
+endif
+ifneq ($(strip $(TARGET_INIT_VENDOR_LIB)),)
+LOCAL_WHOLE_STATIC_LIBRARIES += $(TARGET_INIT_VENDOR_LIB)
+endif
 
 include $(BUILD_EXECUTABLE)
 

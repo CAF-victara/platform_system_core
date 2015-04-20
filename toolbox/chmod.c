@@ -6,61 +6,23 @@
 #include <errno.h>
 #include <sys/limits.h>
 #include <sys/stat.h>
-#include <getopt.h>
+
 #include <unistd.h>
 #include <time.h>
-#include <limits.h>
 #include <fcntl.h>
+#include <getopt.h>
 
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-enum {
-  RECURSIVE_OPT = CHAR_MAX + 1,
-  HELP_OPT
-};
-
-static const char chmod_optstr[] = "hRL";
-struct option chmod_long_opt[] =
-  {
-    {"recursive", no_argument,	NULL, RECURSIVE_OPT},
-    {"help",      no_argument,  NULL, HELP_OPT},
-    {NULL,        no_argument,  NULL, 0}
-  };
-
-static int safe_chmod(char* path, int mode, int traverse_links)
+void recurse_chmod(char* path, int mode, unsigned int flag)
 {
-    struct stat sb;
-    int ret = -1;
-    int fd;
-
-    if(traverse_links) {
-      ret = chmod(path, mode);
-    } else {
-       if(stat(path, &sb) == 0) {
-	 if((S_ISDIR(sb.st_mode)) || (sb.st_nlink == 1)) {
-	   fd = open(path, O_RDONLY | O_NOFOLLOW);
-	   if (fd < 0) {
-	     fd = open(path, O_WRONLY | O_NOFOLLOW);
-	   }
-           if (fd >= 0) {
-	     ret = fchmod(fd,mode);
-	     close(fd);
-	   }
-	 }
-       }
-    }
-    return(ret);
-}
-
-void recurse_chmod(char* path, int mode, int traverse_links)
-{
-/* END IKSECURITY-322 */
     struct dirent *dp;
     DIR *dir = opendir(path);
+    int fd = 0;
     if (dir == NULL) {
         // not a directory, carry on
         return;
     }
-    char *subpath = malloc(sizeof(char)*PATH_MAX);
+    int maxpathlen = sizeof(char)*PATH_MAX;
+    char *subpath = malloc(maxpathlen);
     int pathlen = strlen(path);
 
     while ((dp = readdir(dir)) != NULL) {
@@ -69,28 +31,26 @@ void recurse_chmod(char* path, int mode, int traverse_links)
 
         if (strlen(dp->d_name) + pathlen + 2/*NUL and slash*/ > PATH_MAX) {
             fprintf(stderr, "Invalid path specified: too long\n");
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-	    free(subpath);
-	    closedir(dir);
-/* END IKSECURITY-322 */
             exit(1);
         }
 
-        strcpy(subpath, path);
-        strcat(subpath, "/");
-        strcat(subpath, dp->d_name);
+        strlcpy(subpath, path, maxpathlen);
+        strlcat(subpath, "/", maxpathlen);
+        strlcat(subpath, dp->d_name, maxpathlen);
 
-        if (safe_chmod(subpath, mode, traverse_links) < 0) {
-            fprintf(stderr, "Unable to chmod %s: %s\n", subpath, strerror(errno));
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-            free(subpath);
-            closedir(dir);
-/* END IKSECURITY-322 */
+        if(((fd = open(subpath, flag|O_RDONLY)) != -1) || ((fd = open(subpath, flag|O_WRONLY)) != -1)) {
+            if (fchmod(fd, mode) < 0){
+                fprintf(stderr, "Unable to chmod %s: %s\n", subpath, strerror(errno));
+                close(fd);
+                exit(1);
+            }
+            close(fd);
+        } else {
+            fprintf(stderr, "Unable to open %s: %s\n", subpath, strerror(errno));
             exit(1);
         }
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-        recurse_chmod(subpath, mode, traverse_links);
-/* END IKSECURITY-322 */
+
+        recurse_chmod(subpath, mode, flag);
     }
     free(subpath);
     closedir(dir);
@@ -100,80 +60,90 @@ static int usage()
 {
     fprintf(stderr, "Usage: chmod [OPTION] <MODE> <FILE>\n");
     fprintf(stderr, "  -R, --recursive         change files and directories recursively\n");
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-    fprintf(stderr, "  -L,                     Traverse links (default is to not traverse)\n");
-    fprintf(stderr, "  -h,                     Do not traverse links (default)\n");
+    fprintf(stderr, "  -h, --no-dereference    do not follow symlink\n");
     fprintf(stderr, "  --help                  display this help and exit\n");
-/* END IKSECURITY-322 */
+
     return 10;
 }
 
 int chmod_main(int argc, char **argv)
 {
     int i;
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-    int c;
+    int noFollow = 0;
+    int fd = 0;
+    int ch = 0;
     int recursive = 0;
-    int traverse_links = 0;
-    int index;
+    unsigned int flag =0;
+    int help = 0;
+    static struct option long_options[] =
+        {
+            {"help",       no_argument,       0, 'H'},
+            {"recursive",  no_argument,       0, 'R'},
+            {"no-dereference",  no_argument,  0, 'h'}
+        };
+    /* getopt_long stores the option index here. */
+    int option_index = 0;
+    while((ch = getopt_long(argc, argv, "HhR",long_options,&option_index)) != -1)
+    switch(ch){
+        case 'H':
+            help = 1;
+            break;
+        case 'R':
+            recursive = 1;
+            break;
+        case 'h':
+            noFollow = 1;
+            break;
+        default:
+            break;
 
-    while (((c = getopt_long(argc, argv, chmod_optstr, chmod_long_opt, NULL)) != -1)) 
-    {
-      switch (c) {
-      case 'R':
-      case RECURSIVE_OPT:
-	recursive = 1;
-	break;
-      case 'L':
-	traverse_links = 1;
-	break;
-      case 'h':
-	traverse_links = 0;
-	break;
-
-      case HELP_OPT:
-        usage();
-        break;
-      case '?':
-      default:
-	usage();
-	return EXIT_FAILURE;
-      }
     }
-    index = optind;
-    if (argc - index != 2) {
+
+    if (argc < 3 || help || (recursive && argc < 4)) {
         return usage();
     }
-    argc -= index;
-    argv += index;
 
+    if (recursive) {
+        argc--;
+        argv++;
+    }
+    if (noFollow && argc < 4) {
+        return usage();
+    }
+
+    if(noFollow) {
+        flag = O_NOFOLLOW;
+        argc--;
+        argv++;
+    }
     int mode = 0;
-    const char* s = argv[0];
-/* END IKSECURITY-322 */
+    const char* s = argv[1];
     while (*s) {
         if (*s >= '0' && *s <= '7') {
             mode = (mode<<3) | (*s-'0');
         }
         else {
-	  fprintf(stderr, "Bad mode\n");
+            fprintf(stderr, "Bad mode\n");
             return 10;
         }
         s++;
     }
 
-    for (i = 1; i < argc; i++) {
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-      if (safe_chmod(argv[i], mode, traverse_links) < 0) {
-/* ENDIKSECURITY-322 */
-            fprintf(stderr, "Unable to chmod %s: %s\n", argv[i], strerror(errno));
+    for (i = 2; i < argc; i++) {
+        if(((fd = open(argv[i], flag|O_RDONLY )) != -1)||((fd = open(argv[i], flag|O_WRONLY )) != -1)) {
+            if (fchmod(fd, mode) < 0){
+                fprintf(stderr, "Unable to chmod %s: %s\n", argv[i], strerror(errno));
+                close(fd);
+                return 10;
+            }
+            close(fd);
+        } else {
+            fprintf(stderr, "Unable to open %s: %s\n", argv[i], strerror(errno));
             return 10;
         }
         if (recursive) {
-/* BEGIN Motorola, wljv10, IKSECURITY-322 */
-	  recurse_chmod(argv[i], mode, traverse_links);
-/* END IKSECURITY-322 */
+            recurse_chmod(argv[i], mode, flag);
         }
     }
     return 0;
 }
-

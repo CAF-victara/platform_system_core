@@ -54,6 +54,7 @@
 #define FIRMWARE_DIR1   "/etc/firmware"
 #define FIRMWARE_DIR2   "/vendor/firmware"
 #define FIRMWARE_DIR3   "/firmware/image"
+#define DEVICES_BASE    "/devices/soc.0"
 
 extern struct selabel_handle *sehandle;
 extern char bootdevice[32];
@@ -175,7 +176,14 @@ void fixup_sys_perms(const char *upath)
     }
     if (access(buf, F_OK) == 0) {
         INFO("restorecon_recursive: %s\n", buf);
+#ifdef _PLATFORM_BASE
+        if(!strcmp(upath, DEVICES_BASE))
+            restorecon(buf);
+        else
+            restorecon_recursive(buf);
+#else
         restorecon_recursive(buf);
+#endif
     }
 }
 
@@ -280,11 +288,18 @@ static void add_platform_device(const char *path)
     struct platform_node *bus;
     const char *name = path;
 
+#ifdef _PLATFORM_BASE
+    if (!strncmp(path, _PLATFORM_BASE, strlen(_PLATFORM_BASE)))
+        name += strlen(_PLATFORM_BASE);
+    else
+        return;
+#else
     if (!strncmp(path, "/devices/", 9)) {
         name += 9;
         if (!strncmp(name, "platform/", 9))
             name += 9;
     }
+#endif
 
     list_for_each_reverse(node, &platform_names) {
         bus = node_to_item(node, struct platform_node, list);
@@ -553,6 +568,7 @@ static char **get_block_device_symlinks(struct uevent *uevent)
     int ret;
     char *p;
     unsigned int size;
+    int is_bootdevice = 0;
     struct stat info;
 
     pdev = find_platform_device(uevent->path);
@@ -566,14 +582,19 @@ static char **get_block_device_symlinks(struct uevent *uevent)
         return NULL;
     }
 
-    char **links = malloc(sizeof(char *) * 4);
+    char **links = malloc(sizeof(char *) * 6);
     if (!links)
         return NULL;
-    memset(links, 0, sizeof(char *) * 4);
+    memset(links, 0, sizeof(char *) * 6);
 
     INFO("found %s device %s\n", type, device);
 
     snprintf(link_path, sizeof(link_path), "/dev/block/%s/%s", type, device);
+
+    if (bootdevice[0] != '\0' && !strncmp(device, bootdevice, sizeof(bootdevice))) {
+        make_link(link_path, "/dev/block/bootdevice");
+        is_bootdevice = 1;
+    }
 
     if (uevent->partition_name) {
         p = strdup(uevent->partition_name);
@@ -584,6 +605,13 @@ static char **get_block_device_symlinks(struct uevent *uevent)
             link_num++;
         else
             links[link_num] = NULL;
+
+        if (is_bootdevice) {
+            if (asprintf(&links[link_num], "/dev/block/bootdevice/by-name/%s", p) > 0)
+                link_num++;
+            else
+                links[link_num] = NULL;
+        }
         free(p);
     }
 
@@ -592,6 +620,13 @@ static char **get_block_device_symlinks(struct uevent *uevent)
             link_num++;
         else
             links[link_num] = NULL;
+
+        if (is_bootdevice) {
+            if (asprintf(&links[link_num], "/dev/block/bootdevice/by-num/p%d", uevent->partition_num) > 0)
+                link_num++;
+            else
+                links[link_num] = NULL;
+        }
     }
 
     slash = strrchr(uevent->path, '/');
@@ -871,6 +906,22 @@ static int load_firmware(int fw_fd, int loading_fd, int data_fd)
     if(fstat(fw_fd, &st) < 0)
         return -1;
     len_to_copy = st.st_size;
+
+    if (S_ISBLK(st.st_mode)) {
+        //File points to a block device.Need to calculate its size
+        //manually
+        len_to_copy = lseek64(fw_fd, 0, SEEK_END);
+        if (len_to_copy < 0) {
+            ERROR("Failed to get size of block device partition: %s\n",
+                            strerror(errno));
+            return -1;
+        }
+        if (lseek64(fw_fd, 0, SEEK_SET) < 0) {
+            ERROR("Failed to set r/w offset for block device partition: %s\n",
+                            strerror(errno));
+            return -1;
+        }
+    }
 
     write(loading_fd, "1", 1);  /* start transfer */
 

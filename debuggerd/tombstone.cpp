@@ -374,11 +374,7 @@ static void dump_nearby_maps(BacktraceMap* map, log_t* log, pid_t tid) {
   }
 }
 
-static void dump_thread(
-    Backtrace* backtrace, log_t* log, int* total_sleep_time_usec) {
-
-  wait_for_stop(backtrace->Tid(), total_sleep_time_usec);
-
+static void dump_thread(Backtrace* backtrace, log_t* log) {
   dump_registers(log, backtrace->Tid());
   dump_backtrace_and_stack(backtrace, log);
 
@@ -421,13 +417,17 @@ static bool dump_sibling_thread_report(
       continue;
     }
 
+    if (wait_for_sigstop(new_tid, total_sleep_time_usec, &detach_failed) == -1) {
+      continue;
+    }
+
     log->current_tid = new_tid;
     _LOG(log, logtype::THREAD, "--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---\n");
     dump_thread_info(log, pid, new_tid);
 
     UniquePtr<Backtrace> backtrace(Backtrace::Create(pid, new_tid, map));
     if (backtrace->Unwind(0)) {
-      dump_thread(backtrace.get(), log, total_sleep_time_usec);
+      dump_thread(backtrace.get(), log);
     }
 
     log->current_tid = log->crashed_tid;
@@ -628,7 +628,7 @@ static bool dump_crash(log_t* log, pid_t pid, pid_t tid, int signal, int si_code
   UniquePtr<Backtrace> backtrace(Backtrace::Create(pid, tid, map.get()));
   if (backtrace->Unwind(0)) {
     dump_abort_message(backtrace.get(), log, abort_msg_address);
-    dump_thread(backtrace.get(), log, total_sleep_time_usec);
+    dump_thread(backtrace.get(), log);
   }
 
   if (want_logs) {
@@ -744,6 +744,7 @@ char* engrave_tombstone(pid_t pid, pid_t tid, int signal, int original_si_code,
   log_t log;
   log.current_tid = tid;
   log.crashed_tid = tid;
+  int fd = -1;
 
   /* BEGIN Motorola, wcg763, 02/01/10, JIRA IKMAP-4768; qa6317, 02/10/10, IKMAP-5931 */
   if ((mkdir(TOMBSTONE_DIR, 02755) == -1) && (errno != EEXIST)) {
@@ -753,11 +754,18 @@ char* engrave_tombstone(pid_t pid, pid_t tid, int signal, int original_si_code,
   if (chmod(TOMBSTONE_DIR, 02775) == -1) {
     _LOG(&log, logtype::ERROR, "failed to change mode of %s: %s\n", TOMBSTONE_DIR, strerror(errno));
   }
-  if (chown(TOMBSTONE_DIR, AID_SYSTEM, AID_MOT_TOMBSTONE) == -1) {
-    _LOG(&log, logtype::ERROR, "failed to change ownership of %s: %s\n", TOMBSTONE_DIR, strerror(errno));
+  if(((fd = open(TOMBSTONE_DIR, O_NOFOLLOW|O_RDONLY)) != -1) ||((fd = open(TOMBSTONE_DIR, O_NOFOLLOW|O_WRONLY)) != -1)){
+    if (fchown(fd, AID_SYSTEM, AID_MOT_TOMBSTONE) < 0){
+       _LOG(&log, logtype::ERROR, "failed to change ownership of %s: %s\n", TOMBSTONE_DIR, strerror(errno));
+       close(fd);
+       return NULL;
+    }
+    close(fd);
+  } else {
+    _LOG(&log, logtype::ERROR, "failed to open %s: %s\n", TOMBSTONE_DIR, strerror(errno));
+    return NULL;
   }
   /* END IKMAP-4768; IKMAP-5931 */
-  int fd = -1;
   char* path = NULL;
   if (selinux_android_restorecon(TOMBSTONE_DIR, 0) == 0) {
     path = find_and_open_tombstone(&fd);

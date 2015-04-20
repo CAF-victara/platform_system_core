@@ -1167,12 +1167,12 @@ int main(int argc, char **argv)
     if (is_charger) {
         action_for_each_trigger("charger", action_add_queue_tail);
     } else {
-        if (is_ffbm)
+        if (is_ffbm) {
             action_for_each_trigger("ffbm", action_add_queue_tail);
-        else
+        } else {
             action_for_each_trigger("late-init", action_add_queue_tail);
+        }
     }
-
     /* run all property triggers based on current state of the properties */
     queue_builtin_action(queue_property_triggers_action, "queue_property_triggers");
 

@@ -96,6 +96,9 @@
 #define AID_NET_BT_STACK  3008  /* bluetooth: access config files */
 #define AID_QCOM_DIAG     3009  /* can read/write /dev/diag */
 #define AID_IMS 3010 /* can read/write /dev/socket/imsrtp */
+#define AID_SENSORS       3011 /* access to /dev/socket/sensor_ctl_socket & QCCI/QCSI */
+#define AID_RFS           3012  /* Remote Filesystem for peripheral processors */
+#define AID_RFS_SHARED    3013  /* Shared files for Remote Filesystem for peripheral processors  */
 
 #define AID_MOT_ACCY      9000  /* access to accessory */
 #define AID_MOT_PWRIC     9001  /* power IC */
@@ -119,7 +122,9 @@
 #define AID_POWER         9017 /* power management */
 
 #define AID_MOT_DBVC      9014  /* mot_dbvc - This group is used to access DataBlock feature */
+
 #define AID_EVERYBODY     9997  /* shared between all apps in the same profile */
+
 #define AID_MISC          9998  /* access to misc storage */
 #define AID_NOBODY        9999
 
@@ -193,10 +198,14 @@ static const struct android_id_info android_ids[] = {
     { "net_raw",       AID_NET_RAW, },
     { "net_admin",     AID_NET_ADMIN, },
     { "net_bw_stats",  AID_NET_BW_STATS, },
+    { "qcom_diag", AID_QCOM_DIAG, },
     { "ims", AID_IMS, },
     { "net_bw_acct",   AID_NET_BW_ACCT, },
     { "net_bt_stack",  AID_NET_BT_STACK, },
-
+    { "qcom_diag", AID_QCOM_DIAG, },
+    { "sensors",       AID_SENSORS, },
+    { "rfs",           AID_RFS, },
+    { "rfs_shared",    AID_RFS_SHARED, },
     { "everybody",     AID_EVERYBODY, },
     { "misc",          AID_MISC, },
     { "nobody",        AID_NOBODY, },
@@ -305,7 +314,6 @@ static const struct fs_path_config android_files[] = {
     { 06755, AID_ROOT,      AID_ROOT,      0, "system/xbin/librank" },
     { 06755, AID_ROOT,      AID_ROOT,      0, "system/xbin/procrank" },
     { 06755, AID_ROOT,      AID_ROOT,      0, "system/xbin/procmem" },
-    { 06755, AID_ROOT,      AID_ROOT,      0, "system/xbin/tcpdump" },
     /* the following file is INTENTIONALLY set-uid, and IS included
      * in user builds. */
     { 06750, AID_ROOT,      AID_DIAG,      0, "system/xbin/sudo" },

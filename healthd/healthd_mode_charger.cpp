@@ -65,20 +65,26 @@ char *locale;
 
 #define BATTERY_UNKNOWN_TIME    (2 * MSEC_PER_SEC)
 #define POWER_ON_KEY_TIME       (2 * MSEC_PER_SEC)
-#define UNPLUGGED_SHUTDOWN_TIME (MSEC_PER_SEC/2)
+#define UNPLUGGED_SHUTDOWN_TIME (1 * MSEC_PER_SEC)
 
 #define BATTERY_FULL_THRESH     95
-#define SCREEN_ON_BATTERY_THRESH 0
 
 #define BACKLIGHT_TOGGLE_PATH "/sys/class/leds/lcd-backlight/brightness"
 
 #define LAST_KMSG_PATH          "/proc/last_kmsg"
 #define LAST_KMSG_PSTORE_PATH   "/sys/fs/pstore/console-ramoops"
 #define LAST_KMSG_MAX_SZ        (32 * 1024)
+#define RED_LED_PATH            "/sys/class/leds/red/brightness"
+#define GREEN_LED_PATH          "/sys/class/leds/green/brightness"
+#define BLUE_LED_PATH           "/sys/class/leds/blue/brightness"
+#define BACKLIGHT_PATH          "/sys/class/leds/lcd-backlight/brightness"
+#define CHARGING_ENABLED_PATH   "/sys/class/power_supply/battery/charging_enabled"
 
 #define LOGE(x...) do { KLOG_ERROR("charger", x); } while (0)
-#define LOGI(x...) do { KLOG_INFO("charger", x); } while (0)
+#define LOGW(x...) do { KLOG_WARNING("charger", x); } while (0)
 #define LOGV(x...) do { KLOG_DEBUG("charger", x); } while (0)
+
+extern int mode;
 
 struct key_state {
     bool pending;
@@ -171,8 +177,37 @@ static struct animation battery_animation = {
     .capacity = 0,
 };
 
-static struct charger charger_state;
+enum {
+    RED_LED = 0x01 << 0,
+    GREEN_LED = 0x01 << 1,
+    BLUE_LED = 0x01 << 2,
+};
 
+struct led_ctl {
+    int color;
+    const char *path;
+};
+
+struct led_ctl leds[3] =
+    {{RED_LED, RED_LED_PATH},
+    {GREEN_LED, GREEN_LED_PATH},
+    {BLUE_LED, BLUE_LED_PATH}};
+
+struct soc_led_color_mapping {
+    int soc;
+    int color;
+};
+
+/* Increasing battery charge percentage vs LED color mapping */
+struct soc_led_color_mapping soc_leds[3] = {
+    {15, RED_LED},
+    {90, RED_LED | GREEN_LED},
+    {100, GREEN_LED},
+};
+
+static struct charger charger_state;
+static struct healthd_config *healthd_config;
+static struct android::BatteryProperties *batt_prop;
 static int char_width;
 static int char_height;
 static bool minui_inited;
@@ -208,6 +243,60 @@ cleanup:
         return 0;
 }
 
+static int set_tricolor_led(int on, int color)
+{
+    int fd, i;
+    char buffer[10];
+
+    for (i = 0; i < (int)ARRAY_SIZE(leds); i++) {
+        if ((color & leds[i].color) && (access(leds[i].path, R_OK | W_OK) == 0)) {
+            fd = open(leds[i].path, O_RDWR);
+            if (fd < 0) {
+                LOGE("Could not open red led node\n");
+                goto cleanup;
+            }
+            if (on)
+                snprintf(buffer, sizeof(int), "%d\n", 255);
+            else
+                snprintf(buffer, sizeof(int), "%d\n", 0);
+
+            if (write(fd, buffer, strlen(buffer)) < 0)
+                LOGE("Could not write to led node\n");
+cleanup:
+            if (fd >= 0)
+                close(fd);
+        }
+    }
+
+    return 0;
+}
+
+static int set_battery_soc_leds(int soc)
+{
+    int i, color;
+    static int old_color = -1;
+    int range_max = ARRAY_SIZE(soc_leds) - 1;
+
+    if (range_max < 0)
+        return 0;
+
+    color = soc_leds[range_max].color;
+    for (i = 0; i <= range_max ; i++) {
+        if (soc < soc_leds[i].soc) {
+            color = soc_leds[i].color;
+            break;
+        }
+    }
+    if (old_color != color) {
+        if (old_color >= 0)
+            set_tricolor_led(0, old_color);
+        set_tricolor_led(1, color);
+        old_color = color;
+    }
+
+    return 0;
+}
+
 /* current time in milliseconds */
 static int64_t curr_time_ms(void)
 {
@@ -231,15 +320,15 @@ static void dump_last_kmsg(void)
     unsigned sz = 0;
     int len;
 
-    LOGI("\n");
-    LOGI("*************** LAST KMSG ***************\n");
-    LOGI("\n");
+    LOGW("\n");
+    LOGW("*************** LAST KMSG ***************\n");
+    LOGW("\n");
     buf = (char *)load_file(LAST_KMSG_PSTORE_PATH, &sz);
 
     if (!buf || !sz) {
         buf = (char *)load_file(LAST_KMSG_PATH, &sz);
         if (!buf || !sz) {
-            LOGI("last_kmsg not found. Cold reset?\n");
+            LOGW("last_kmsg not found. Cold reset?\n");
             goto out;
         }
     }
@@ -258,7 +347,7 @@ static void dump_last_kmsg(void)
 
         yoink = ptr[cnt];
         ptr[cnt] = '\0';
-        klog_write(6, "<6>%s", ptr);
+        klog_write(6, "<4>%s", ptr);
         ptr[cnt] = yoink;
 
         len -= cnt;
@@ -268,9 +357,59 @@ static void dump_last_kmsg(void)
     free(buf);
 
 out:
-    LOGI("\n");
-    LOGI("************* END LAST KMSG *************\n");
-    LOGI("\n");
+    LOGW("\n");
+    LOGW("************* END LAST KMSG *************\n");
+    LOGW("\n");
+}
+
+static int read_file(const char *path, char *buf, size_t sz)
+{
+    int fd;
+    size_t cnt;
+
+    fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        goto err;
+
+    cnt = read(fd, buf, sz - 1);
+    if (cnt <= 0)
+        goto err;
+    buf[cnt] = '\0';
+    if (buf[cnt - 1] == '\n') {
+        cnt--;
+        buf[cnt] = '\0';
+    }
+
+    close(fd);
+    return cnt;
+
+err:
+    if (fd >= 0)
+        close(fd);
+    return -1;
+}
+
+static int read_file_int(const char *path, int *val)
+{
+    char buf[32];
+    int ret;
+    int tmp;
+    char *end;
+
+    ret = read_file(path, buf, sizeof(buf));
+    if (ret < 0)
+        return -1;
+
+    tmp = strtol(buf, &end, 0);
+    if (end == buf ||
+        ((end < buf+sizeof(buf)) && (*end != '\n' && *end != '\0')))
+        goto err;
+
+    *val = tmp;
+    return 0;
+
+err:
+    return -1;
 }
 
 static int get_battery_capacity()
@@ -368,6 +507,21 @@ static void draw_battery(struct charger *charger)
     }
 }
 
+#define STR_LEN    64
+static void draw_capacity(struct charger *charger)
+{
+    char cap_str[STR_LEN];
+    int x, y;
+    int str_len_px;
+
+    snprintf(cap_str, (STR_LEN - 1), "%d%%", charger->batt_anim->capacity);
+    str_len_px = gr_measure(cap_str);
+    x = (gr_fb_width() - str_len_px) / 2;
+    y = (gr_fb_height() + char_height) / 2;
+    android_green();
+    gr_text(x, y, cap_str, 0);
+}
+
 static void redraw_screen(struct charger *charger)
 {
     struct animation *batt_anim = charger->batt_anim;
@@ -375,10 +529,12 @@ static void redraw_screen(struct charger *charger)
     clear_screen();
 
     /* try to display *something* */
-    if (batt_anim->capacity < 0 || batt_anim->num_frames == 0)
+    if (batt_anim->capacity < 0 || batt_anim->num_frames == 0) {
         draw_unknown(charger);
-    else
+    } else {
         draw_battery(charger);
+        draw_capacity(charger);
+    }
     gr_flip();
 }
 
@@ -404,15 +560,16 @@ static void update_screen_state(struct charger *charger, int64_t now)
         return;
 
     if (!minui_inited) {
-        int batt_cap = get_battery_capacity();
 
-        if (batt_cap < SCREEN_ON_BATTERY_THRESH) {
-            LOGV("[%" PRId64 "] level %d, leave screen off\n", now, batt_cap);
-            batt_anim->run = false;
-            charger->next_screen_transition = -1;
-            if (charger->charger_connected)
-                request_suspend(true);
-            return;
+        if (healthd_config && healthd_config->screen_on) {
+            if (!healthd_config->screen_on(batt_prop)) {
+                LOGV("[%" PRId64 "] leave screen off\n", now);
+                batt_anim->run = false;
+                charger->next_screen_transition = -1;
+                if (charger->charger_connected)
+                    request_suspend(true);
+                return;
+            }
         }
 
         gr_init();
@@ -441,17 +598,15 @@ static void update_screen_state(struct charger *charger, int64_t now)
 
     /* animation starting, set up the animation */
     if (batt_anim->cur_frame == 0) {
-        int batt_cap;
         int ret;
 
         LOGV("[%" PRId64 "] animation starting\n", now);
-        batt_cap = get_battery_capacity();
-        if (batt_cap >= 0 && batt_anim->num_frames != 0) {
+        if (batt_prop && batt_prop->batteryLevel >= 0 && batt_anim->num_frames != 0) {
             int i;
 
             /* find first frame given current capacity */
             for (i = 1; i < batt_anim->num_frames; i++) {
-                if (batt_cap < batt_anim->frames[i].min_capacity)
+                if (batt_prop->batteryLevel < batt_anim->frames[i].min_capacity)
                     break;
             }
             batt_anim->cur_frame = i - 1;
@@ -459,11 +614,11 @@ static void update_screen_state(struct charger *charger, int64_t now)
             /* show the first frame for twice as long */
             disp_time = batt_anim->frames[batt_anim->cur_frame].disp_time * 2;
         }
-
-        batt_anim->capacity = batt_cap;
+        if (batt_prop)
+            batt_anim->capacity = batt_prop->batteryLevel;
     }
 
-    /* unblank the screen  on first cycle */
+    /* unblank the screen on first cycle */
     if (batt_anim->cur_cycle == 0) {
         gr_fb_blank(false);
         set_backlight(true);
@@ -567,6 +722,7 @@ static void set_next_key_check(struct charger *charger,
 
 static void process_key(struct charger *charger, int code, int64_t now)
 {
+    struct animation *batt_anim = charger->batt_anim;
     struct key_state *key = &charger->keys[code];
     int64_t next_key_check;
 
@@ -578,10 +734,10 @@ static void process_key(struct charger *charger, int code, int64_t now)
                    all devices. Check the property and continue booting or reboot
                    accordingly. */
                 if (property_get_bool("ro.enable_boot_charger_mode", false)) {
-                    LOGI("[%" PRId64 "] booting from charger mode\n", now);
+                    LOGW("[%" PRId64 "] booting from charger mode\n", now);
                     property_set("sys.boot_from_charger_mode", "1");
                 } else {
-                    LOGI("[%" PRId64 "] rebooting\n", now);
+                    LOGW("[%" PRId64 "] rebooting\n", now);
                     android_reboot(ANDROID_RB_RESTART, 0, 0);
                 }
             } else {
@@ -593,8 +749,16 @@ static void process_key(struct charger *charger, int code, int64_t now)
         } else {
             /* if the power key got released, force screen state cycle */
             if (key->pending) {
-                request_suspend(false);
-                kick_animation(charger->batt_anim);
+                if (!batt_anim->run) {
+                    request_suspend(false);
+                    kick_animation(batt_anim);
+                } else {
+                    reset_animation(batt_anim);
+                    charger->next_screen_transition = -1;
+                    gr_fb_blank(true);
+                    if (charger->charger_connected)
+                        request_suspend(true);
+                }
             }
         }
     }
@@ -612,17 +776,34 @@ static void handle_input_state(struct charger *charger, int64_t now)
 
 static void handle_power_supply_state(struct charger *charger, int64_t now)
 {
+    static int old_soc = 0;
+    int soc;
+
     if (!charger->have_battery_state)
         return;
+
+    soc = get_battery_capacity();
+    if (old_soc != soc) {
+        old_soc = soc;
+        set_battery_soc_leds(soc);
+    }
 
     if (!charger->charger_connected) {
         request_suspend(false);
         if (charger->next_pwr_check == -1) {
+            if (mode == QUICKBOOT) {
+                gr_fb_blank(true);
+                request_suspend(true);
+                /* exit here. There is no need to keep running when charger
+                 * unplugged under QuickBoot mode
+                 */
+                exit(0);
+            }
             charger->next_pwr_check = now + UNPLUGGED_SHUTDOWN_TIME;
-            LOGI("[%" PRId64 "] device unplugged: shutting down in %" PRId64 " (@ %" PRId64 ")\n",
+            LOGW("[%" PRId64 "] device unplugged: shutting down in %" PRId64 " (@ %" PRId64 ")\n",
                  now, (int64_t)UNPLUGGED_SHUTDOWN_TIME, charger->next_pwr_check);
         } else if (now >= charger->next_pwr_check) {
-            LOGI("[%" PRId64 "] shutting down\n", now);
+            LOGW("[%" PRId64 "] shutting down\n", now);
             android_reboot(ANDROID_RB_POWEROFF, 0, 0);
         } else {
             /* otherwise we already have a shutdown timer scheduled */
@@ -630,7 +811,7 @@ static void handle_power_supply_state(struct charger *charger, int64_t now)
     } else {
         /* online supply present, reset shutdown timer if set */
         if (charger->next_pwr_check != -1) {
-            LOGI("[%" PRId64 "] device plugged in: shutdown cancelled\n", now);
+            LOGW("[%" PRId64 "] device plugged in: shutdown cancelled\n", now);
             kick_animation(charger->batt_anim);
         }
         charger->next_pwr_check = -1;
@@ -660,7 +841,6 @@ void healthd_mode_charger_battery_update(
     charger->charger_connected =
         props->chargerAcOnline || props->chargerUsbOnline ||
         props->chargerWirelessOnline;
-    charger->capacity = props->batteryLevel;
 
     if (!charger->have_battery_state) {
         charger->have_battery_state = true;
@@ -668,6 +848,7 @@ void healthd_mode_charger_battery_update(
         reset_animation(charger->batt_anim);
         kick_animation(charger->batt_anim);
     }
+    batt_prop = props;
 }
 
 int healthd_mode_charger_preparetowait(void)
@@ -720,16 +901,27 @@ static void charger_event_handler(uint32_t /*epevents*/)
         ev_dispatch();
 }
 
-void healthd_mode_charger_init(struct healthd_config* /*config*/)
+void healthd_mode_charger_init(struct healthd_config* config)
 {
     int ret;
+    int charging_enabled = 1;
     struct charger *charger = &charger_state;
     int i;
     int epollfd;
 
     dump_last_kmsg();
 
-    LOGI("--------------- STARTING CHARGER MODE ---------------\n");
+    LOGW("--------------- STARTING CHARGER MODE ---------------\n");
+
+    if (mode == NORMAL) {
+        /* check the charging is enabled or not */
+        ret = read_file_int(CHARGING_ENABLED_PATH, &charging_enabled);
+        if (!ret && !charging_enabled) {
+            /* if charging is disabled, reboot and exit power off charging */
+            LOGW("android charging is disabled, exit!\n");
+            android_reboot(ANDROID_RB_RESTART, 0, 0);
+        }
+    }
 
     ret = ev_init(input_callback, charger);
     if (!ret) {
@@ -768,4 +960,5 @@ void healthd_mode_charger_init(struct healthd_config* /*config*/)
     charger->next_screen_transition = -1;
     charger->next_key_check = -1;
     charger->next_pwr_check = -1;
+    healthd_config = config;
 }

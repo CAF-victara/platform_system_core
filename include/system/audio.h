@@ -43,6 +43,13 @@ __BEGIN_DECLS
 #define AAC_FRAMESIZE 2048
 
 /* AudioFlinger and AudioPolicy services use I/O handles to identify audio sources and sinks */
+
+#define AMR_FRAMESIZE 32
+#define QCELP_FRAMESIZE 35
+#define EVRC_FRAMESIZE 23
+#define AMR_WB_FRAMESIZE 61
+#define AAC_FRAMESIZE 2048
+
 typedef int audio_io_handle_t;
 #define AUDIO_IO_HANDLE_NONE    0
 
@@ -64,10 +71,16 @@ typedef enum {
                                         * and must be routed to speaker
                                         */
     AUDIO_STREAM_DTMF             = 8,
-    AUDIO_STREAM_TTS              = 9,
 
-    AUDIO_STREAM_CNT,
-    AUDIO_STREAM_MAX              = AUDIO_STREAM_CNT - 1,
+    AUDIO_STREAM_TTS              = 9,  /* Transmitted Through Speaker.
+                                         * Plays over speaker only, silent on other devices.
+                                         */
+    AUDIO_STREAM_ACCESSIBILITY    = 10, /* For accessibility talk back prompts */
+    AUDIO_STREAM_REROUTING        = 11, /* For dynamic policy output mixes */
+    AUDIO_STREAM_PATCH            = 12, /* For internal audio flinger tracks. Fixed volume */
+    AUDIO_STREAM_INCALL_MUSIC     = 13,
+    AUDIO_STREAM_PUBLIC_CNT       = AUDIO_STREAM_TTS + 1,
+    AUDIO_STREAM_CNT              = AUDIO_STREAM_INCALL_MUSIC + 1,
 } audio_stream_type_t;
 
 /* Do not change these values without updating their counterparts
@@ -103,6 +116,7 @@ typedef enum {
     AUDIO_USAGE_ASSISTANCE_NAVIGATION_GUIDANCE     = 12,
     AUDIO_USAGE_ASSISTANCE_SONIFICATION            = 13,
     AUDIO_USAGE_GAME                               = 14,
+    AUDIO_USAGE_VIRTUAL_SOURCE                     = 15,
 
     AUDIO_USAGE_CNT,
     AUDIO_USAGE_MAX                                = AUDIO_USAGE_CNT - 1,
@@ -140,10 +154,11 @@ typedef enum {
                                           /* An example of remote presentation is Wifi Display */
                                           /*  where a dongle attached to a TV can be used to   */
                                           /*  play the mix captured by this audio source.      */
-    AUDIO_SOURCE_FM_RX               = 9,
-    AUDIO_SOURCE_FM_RX_A2DP          = 10,
+    AUDIO_SOURCE_FM_RX               = 10,
+    AUDIO_SOURCE_FM_RX_A2DP          = 11,
     AUDIO_SOURCE_CNT,
     AUDIO_SOURCE_MAX                 = AUDIO_SOURCE_CNT - 1,
+    AUDIO_SOURCE_FM_TUNER            = 1998,
     AUDIO_SOURCE_HOTWORD             = 1999, /* A low-priority, preemptible audio source for
                                                 for background software hotword detection.
                                                 Same tuning as AUDIO_SOURCE_VOICE_RECOGNITION.
@@ -268,6 +283,7 @@ typedef enum {
     AUDIO_FORMAT_OPUS                = 0x08000000UL,
     AUDIO_FORMAT_AC3                 = 0x09000000UL,
     AUDIO_FORMAT_E_AC3               = 0x0A000000UL,
+    
     AUDIO_FORMAT_EVRC                = 0x0B000000UL,
     AUDIO_FORMAT_QCELP               = 0x0C000000UL,
     AUDIO_FORMAT_AC3_PLUS            = 0x0D000000UL,
@@ -305,7 +321,6 @@ typedef enum {
                                           AUDIO_FORMAT_DOLBY_SUB_DM),
     AUDIO_FORMAT_E_AC3_DM             =  (AUDIO_FORMAT_E_AC3 |
                                           AUDIO_FORMAT_DOLBY_SUB_DM),
-
     AUDIO_FORMAT_PCM_24_BIT_PACKED   = (AUDIO_FORMAT_PCM |
                                         AUDIO_FORMAT_PCM_SUB_24_BIT_PACKED),
     AUDIO_FORMAT_AAC_MAIN            = (AUDIO_FORMAT_AAC |
@@ -806,6 +821,8 @@ typedef enum {
                                          // indicate HAL to activate EC & NS
                                          // path for VOIP calls
     AUDIO_OUTPUT_FLAG_INCALL_MUSIC = 0x8000 //use this flag for incall music delivery
+    // flag for HDMI compressed passthrough
+    AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH = 0x4000
 } audio_output_flags_t;
 
 /* The audio input flags are analogous to audio output flags.
@@ -836,6 +853,7 @@ typedef struct {
     bool has_video;                     // true if stream is tied to a video stream
     bool is_streaming;                  // true if streaming, false if local playback
     uint16_t bit_width;                 // bits per sample
+    bool use_small_bufs;                // true if offloading audio track
 } audio_offload_info_t;
 
 #define AUDIO_MAKE_OFFLOAD_INFO_VERSION(maj,min) \
@@ -854,7 +872,9 @@ static const audio_offload_info_t AUDIO_INFO_INITIALIZER = {
     bit_rate: 0,
     duration_us: 0,
     has_video: false,
-    is_streaming: false
+    is_streaming: false,
+    bit_width: 16,
+    use_small_bufs: false,
 };
 
 /* common audio stream configuration parameters
@@ -1361,7 +1381,8 @@ static inline audio_channel_mask_t audio_channel_in_mask_from_count(uint32_t cha
         bits = AUDIO_CHANNEL_IN_STEREO;
         break;
     case 6:
-        return AUDIO_CHANNEL_IN_5POINT1;
+        bits = AUDIO_CHANNEL_IN_5POINT1;
+        break;
     default:
         return AUDIO_CHANNEL_INVALID;
     }
@@ -1498,6 +1519,7 @@ static inline size_t audio_bytes_per_sample(audio_format_t format)
         size = sizeof(uint8_t) * 3;
         break;
     case AUDIO_FORMAT_PCM_16_BIT:
+    case AUDIO_FORMAT_PCM_16_BIT_OFFLOAD:
         size = sizeof(int16_t);
         break;
     case AUDIO_FORMAT_PCM_8_BIT:

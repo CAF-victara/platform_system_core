@@ -292,6 +292,30 @@ static int device_is_debuggable() {
     return strcmp(value, "1") ? 0 : 1;
 }
 
+static int device_is_secure() {
+    int ret = -1;
+    char value[PROP_VALUE_MAX];
+    ret = __system_property_get("ro.secure", value);
+    /* If error, we want to fail secure */
+    if (ret < 0)
+        return 1;
+    return strcmp(value, "0") ? 1 : 0;
+}
+
+static int device_is_force_encrypted() {
+    int ret = -1;
+    char value[PROP_VALUE_MAX];
+    ret = __system_property_get("ro.vold.forceencryption", value);
+    if (ret < 0)
+        return 0;
+    return strcmp(value, "1") ? 0 : 1;
+}
+
+/* When multiple fstab records share the same mount_point, it will
+ * try to mount each one in turn, and ignore any duplicates after a
+ * first successful mount.
+ * Returns -1 on error, and  FS_MGR_MNTALL_* otherwise.
+ */
 int fs_mgr_mount_all(struct fstab *fstab)
 {
     int i = 0, retry = MAX_MOUNT_RETRIES;
@@ -352,6 +376,9 @@ int fs_mgr_mount_all(struct fstab *fstab)
                     continue;
                 }
             }
+		    if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) && device_is_debuggable() ) {
+		      INFO("Device is debuggable: Verity disabled");
+		    }
 
             ret = __mount(fstab->recs[i].blk_device, fstab->recs[i].mount_point, &fstab->recs[i]);
         }
@@ -501,12 +528,17 @@ int fs_mgr_do_mount(struct fstab *fstab, char *n_name, char *n_blk_device,
                      fstab->recs[i].mount_point);
         }
 
-        if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) &&
-            !device_is_debuggable()) {
-            if (fs_mgr_setup_verity(&fstab->recs[i]) < 0) {
+        if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) && device_is_secure() && !device_is_debuggable()) {
+            int rc = fs_mgr_setup_verity(&fstab->recs[i]);
+            if (device_is_debuggable() && rc == FS_MGR_SETUP_VERITY_DISABLED) {
+                INFO("Verity disabled");
+            } else if (rc != FS_MGR_SETUP_VERITY_SUCCESS) {
                 ERROR("Could not set up verified partition, skipping!\n");
                 continue;
             }
+        }
+        if ((fstab->recs[i].fs_mgr_flags & MF_VERIFY) && device_is_debuggable() ) {
+          INFO("Device is debuggable: Verity disabled");
         }
 
         /* Now mount it where requested */

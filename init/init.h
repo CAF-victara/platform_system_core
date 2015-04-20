@@ -91,6 +91,8 @@ struct svcrlimitinfo {
 
 #define COMMAND_RETRY_TIMEOUT 5
 
+#define COLDBOOT_RETRY_TIMEOUT 10
+
 struct service {
         /* list of all services */
     struct listnode slist;
