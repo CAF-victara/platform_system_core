@@ -591,6 +591,7 @@ int fs_mgr_mount_all(struct fstab *fstab)
     int error_count = 0;
     int ret = -1;
     int mount_errno = 0;
+    int attempted_idx = -1;
     int formatted_userdata = 0;
 
     if (!fstab) {
@@ -675,12 +676,12 @@ int fs_mgr_mount_all(struct fstab *fstab)
             int last_idx_inspected;
             int top_idx = i;
 
-            mret = mount_with_alternatives(fstab, i, &last_idx_inspected, &attempted_idx);
+            ret = mount_with_alternatives(fstab, i, &last_idx_inspected, &attempted_idx);
             i = last_idx_inspected;
             mount_errno = errno;
 
             /* Deal with encryptability. */
-            if (!mret) {
+            if (!ret) {
                 int status = handle_encryptable(fstab, &fstab->recs[attempted_idx]);
 
                 if (status == FS_MGR_MNTALL_FAIL) {
@@ -702,7 +703,7 @@ int fs_mgr_mount_all(struct fstab *fstab)
 
             /* mount(2) returned an error, handle the encryptable/formattable case */
             bool wiped = partition_wiped(fstab->recs[top_idx].blk_device);
-            if (mret && mount_errno != EBUSY && mount_errno != EACCES &&
+            if (ret && mount_errno != EBUSY && mount_errno != EACCES &&
                 fs_mgr_is_formattable(&fstab->recs[top_idx]) && wiped) {
                 /* top_idx and attempted_idx point at the same partition, but sometimes
                  * at two different lines in the fstab.  Use the top one for formatting
@@ -735,7 +736,7 @@ int fs_mgr_mount_all(struct fstab *fstab)
                  */
                  ERROR("Mount failed; suggest recovery.\n");
             }
-            if (mret && mount_errno != EBUSY && mount_errno != EACCES &&
+            if (ret && mount_errno != EBUSY && mount_errno != EACCES &&
                 fs_mgr_is_encryptable(&fstab->recs[attempted_idx])) {
                 if (wiped) {
                     ERROR("%s(): %s is wiped and %s %s is encryptable. Suggest recovery...\n", __func__,

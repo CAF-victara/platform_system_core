@@ -459,7 +459,7 @@ void import_kernel_cmdline(bool in_qemu, std::function<void(char*,bool)> import_
     char *val;
 
     #define MAX_ARG_SZ 256
-    arg = malloc(MAX_ARG_SZ);
+    arg = (char*) malloc(MAX_ARG_SZ);
     if (!arg) {
         ERROR("Error: Can't alloc buffer for command line processing\n");
         return;

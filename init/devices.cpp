@@ -440,7 +440,7 @@ static char **get_v4l_device_symlinks(struct uevent *uevent)
     if (strncmp(uevent->path, "/devices/virtual/video4linux/video", 34))
         return NULL;
 
-    links = malloc(sizeof(char *) * 2);
+    links = (char**) malloc(sizeof(char *) * 2);
     if (!links)
         return NULL;
     memset(links, 0, sizeof(char *) * 2);
@@ -960,41 +960,6 @@ out_extended:
 #endif
 /* END IKVOICE-4341 */
 
-gzFile fw_gzopen(const char *fname, const char *mode)
-{
-    char *file1 = NULL, *file2 = NULL, *file3 = NULL;
-    int l;
-    gzFile gz_fd = NULL;
-
-    l = asprintf(&file1, FIRMWARE_DIR1"/%s.gz", fname);
-    if (l == -1)
-        goto out;
-
-    l = asprintf(&file2, FIRMWARE_DIR2"/%s.gz", fname);
-    if (l == -1)
-        goto file1_free_out;
-
-    l = asprintf(&file3, FIRMWARE_DIR3"/%s.gz", fname);
-    if (l == -1)
-        goto file2_free_out;
-
-    gz_fd = gzopen(file1, mode);
-    if(!gz_fd) {
-        gz_fd = gzopen(file2, mode);
-        if (!gz_fd) {
-            gz_fd = gzopen(file3, mode);
-        }
-    }
-
-    free(file3);
-file2_free_out:
-    free(file2);
-file1_free_out:
-    free(file1);
-out:
-    return gz_fd;
-}
-
 static void process_firmware_event(struct uevent *uevent)
 {
     char *root, *loading, *data;
@@ -1043,7 +1008,7 @@ try_loading_again:
         fw_fd = open(file, O_RDONLY|O_CLOEXEC);
         free(file);
         if (fw_fd >= 0) {
-            if(!load_firmware(fw_fd, loading_fd, data_fd))
+            if(!load_firmware(fw_fd, NULL, loading_fd, data_fd))
                 INFO("firmware: copy success { '%s', '%s' }\n", root, uevent->firmware);
             else
                 INFO("firmware: copy failure { '%s', '%s' }\n", root, uevent->firmware);

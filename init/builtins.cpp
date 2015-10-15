@@ -76,61 +76,6 @@ static int is_hard_link(const char *path)
 }
 // END IKKRNBSP-1333
 
-static int write_file(const char *path, const char *value)
-{
-    int fd, ret, len;
-
-    // BEGIN Motorola, wljv10, 01/23/2013, IKKRNBSP-1333 no hard link access
-    if(is_hard_link(path))
-      return -1;
-    // END IKKRNBSP-1333
-
-    fd = open(path, O_WRONLY|O_CREAT|O_NOFOLLOW, 0600);
-
-    if (fd < 0)
-        return -errno;
-
-    len = strlen(value);
-
-    do {
-        ret = write(fd, value, len);
-    } while (ret < 0 && errno == EINTR);
-
-    close(fd);
-    if (ret < 0) {
-        return -errno;
-    } else {
-        return 0;
-    }
-}
-
-static int _open(const char *path)
-{
-    int fd;
-
-    // BEGIN Motorola, wljv10, 01/23/2013, IKKRNBSP-1333 no hard link access
-    if(is_hard_link(path))
-      return(-1);
-    // END IKKRNBSP-1333
-
-    fd = open(path, O_RDONLY | O_NOFOLLOW);
-    if (fd < 0)
-        fd = open(path, O_WRONLY | O_NOFOLLOW);
-
-    return fd;
-}
-
-static int _chown(const char *path, unsigned int uid, unsigned int gid)
-{
-    int fd;
-    int ret;
-
-    fd = _open(path);
-    if (fd < 0) {
-        return -1;
-    }
-}
-
 static int insmod(const char *filename, char *options)
 {
     char filename_val[PROP_VALUE_MAX];

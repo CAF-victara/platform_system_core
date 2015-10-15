@@ -876,7 +876,7 @@ static void parse_line_service(struct parse_state *state, int nargs, char **args
             parse_error(state, "rlimit option requires resource, cur, max arguments\n");
             break;
         }
-        ri = calloc(1, sizeof(*ri));
+        ri = (svcrlimitinfo*) calloc(1, sizeof(*ri));
         if (!ri) {
             parse_error(state, "out of memory\n");
             break;
