@@ -33,27 +33,7 @@
 #include "ueventd_parser.h"
 #include "property_service.h"
 
-static char hardware[32];
-static unsigned revision = 0;
 char boot_device[PROP_VALUE_MAX];
-
-static void import_kernel_nv(char *name, int in_qemu)
-{
-    if (*name != '\0') {
-        char *value = strchr(name, '=');
-        if (value != NULL) {
-            *value++ = 0;
-            if (!strcmp(name,"androidboot.hardware"))
-            {
-                strlcpy(hardware, value, sizeof(hardware));
-            }
-            else if (!strcmp(name,"androidboot.bootdevice"))
-            {
-                strlcpy(bootdevice, value, sizeof(bootdevice));
-            }
-        }
-    }
-}
 
 int ueventd_main(int argc, char **argv)
 {

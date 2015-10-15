@@ -60,14 +60,6 @@ OUR_TOOLS := \
     uptime \
     watchprops \
 
-# Motorola - BEGIN - IKAPP-606 - wqnt78 - 3/10/2010 - apython enabler
-
-# Note: sendevent2 is in toolbox instead of motobox to avoid GPL issues
-
-OUR_TOOLS += sendevent2
-
-# Motorola - END - IKAPP-606 - wqnt78 - 3/10/2010 - apython enabler
-
 # Motorola, rknize2, 2013-Apr-16, IKJBXLINE-3829
 OUR_TOOLS += setfattr
 

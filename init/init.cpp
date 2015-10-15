@@ -74,12 +74,6 @@ static int property_triggers_enabled = 0;
 #if BOOTCHART
 static int   bootchart_count;
 #endif
-
-static char console[32];
-static char bootmode[32];
-static char baseband[32];
-static char hardware[32];
-static unsigned revision = 0;
 static char qemu[32];
 
 static struct action *cur_action = NULL;
@@ -1109,44 +1103,6 @@ int main(int argc, char** argv) {
     start_property_service();
 
     init_parse_config_file("/init.rc");
-#endif
-
-    /* BEGIN IKKRNBSP-1013, 3/13/2012, jcarlyle, Add more init.rc layers. */
-
-    /* If kernel's product is different from androidboot.hardware=, check for
-     * a kernel product-specific initialization file and read if present. */
-    product[0] = '\0';
-    get_hardware_name(product, &local_revision);
-    if (product[0] && (strncmp(product, hardware, sizeof(product) != 0))) {
-        snprintf(tmp, sizeof(tmp), "/init.%s.rc", product);
-        if (access(tmp, R_OK) == 0) {
-            INFO("Reading product [%s] specific config file", product);
-            init_parse_config_file(tmp);
-        }
-    }
-
-    /* If androidboot.baseband is set, check for a baseband-specific
-     * initialization file and read if present. */
-    if (baseband[0]) {
-        snprintf(tmp, sizeof(tmp), "/init.%s.rc", baseband);
-        if (access(tmp, R_OK) == 0) {
-            INFO("Reading baseband [%s] specific config file", baseband);
-            init_parse_config_file(tmp);
-        }
-    }
-
-    /* If androidboot.carrier is set or if ro.carrier is
-     * defined in the default build properties, check for a carrier-specific
-     * initialization and read if present. */
-    if (property_get("ro.carrier", carrier)) {
-        snprintf(tmp, sizeof(tmp), "/init.%s.rc", carrier);
-        if (access(tmp, R_OK) == 0) {
-            INFO("Reading carrier [%s] specific config file", carrier);
-            init_parse_config_file(tmp);
-        }
-    }
-
-    /* END IKKRNBSP-1013, 3/13/2012, jcarlyle, Add more init.rc layers. */
 
     action_for_each_trigger("early-init", action_add_queue_tail);
 
@@ -1172,10 +1128,7 @@ int main(int argc, char** argv) {
         KLOG_ERROR("Booting into ffbm mode\n");
         action_for_each_trigger("ffbm", action_add_queue_tail);
     } else {
-        if (is_ffbm)
-            action_for_each_trigger("ffbm", action_add_queue_tail);
-        else
-            action_for_each_trigger("late-init", action_add_queue_tail);
+        action_for_each_trigger("late-init", action_add_queue_tail);
     }
 
     // Run all property triggers based on current state of the properties.

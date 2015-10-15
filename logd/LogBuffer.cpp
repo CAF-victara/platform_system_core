@@ -135,13 +135,13 @@ LogBuffer::LogBuffer(LastLogTimes *times) : mTimes(*times) {
     init();
 }
 
-void LogBuffer::log(log_id_t log_id, log_time realtime,
+int LogBuffer::log(log_id_t log_id, log_time realtime,
                     uid_t uid, pid_t pid, pid_t tid,
                     const char *msg, unsigned short len) {
-    log(log_id, realtime, uid, pid, tid, 0, msg, len);
+    return log(log_id, realtime, uid, pid, tid, 0, msg, len);
 }
 
-void LogBuffer::log(log_id_t log_id, log_time realtime,
+int LogBuffer::log(log_id_t log_id, log_time realtime,
                     uid_t uid, pid_t pid, pid_t tid, uint8_t drops,
                     const char *msg, unsigned short len) {
     if ((log_id >= LOG_ID_MAX) || (log_id < 0)) {
@@ -257,7 +257,7 @@ void LogBuffer::log(log_id_t log_id, log_time realtime,
 
     stats.add(elem);
     if (drops_elem) {
-        stats.add(drops_msg_len, log_id, uid, pid);
+        stats.add(drops_elem);
     }
     maybePrune(log_id);
     pthread_mutex_unlock(&mLogElementsLock);

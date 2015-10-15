@@ -221,7 +221,7 @@ int dhcp_get_results(const char *interface,
         snprintf(errmsg, sizeof(errmsg), "%s", "DHCP result property was not set");
         return -1;
     }
-    if (strcmp(prop_value, "ok") == 0) {
+    if (strcmp(prop_value, "ok") == 0 || strcmp(prop_value, "limited") == 0) {
         if (fill_ip_info(interface, ipaddr, gateway, prefixLength, dns,
                 server, lease, vendorInfo, domain, mtu) == -1) {
             return -1;
@@ -297,25 +297,7 @@ int dhcp_start(const char *interface)
         return -1;
     }
 
-    if (!property_get(result_prop_name, prop_value, NULL)) {
-        /* shouldn't ever happen, given the success of wait_for_property() */
-        snprintf(errmsg, sizeof(errmsg), "%s", "DHCP result property was not set");
-        return -1;
-    }
-    //BEGIN MOT JB UPMERGE, w20079, Aug 10, 2012
-    //Changed for auto ip feature
-    if (strcmp(prop_value, "ok") == 0 || strcmp(prop_value, "limited") == 0) {
-    //END MOT JB UPMERGE
-        char dns_prop_name[PROPERTY_KEY_MAX];
-        if (fill_ip_info(interface, ipaddr, gateway, prefixLength, dns,
-                server, lease, vendorInfo, domain, mtu) == -1) {
-            return -1;
-        }
-        return 0;
-    } else {
-        snprintf(errmsg, sizeof(errmsg), "DHCP result was %s", prop_value);
-        return -1;
-    }
+    return 0;
 }
 
 /**

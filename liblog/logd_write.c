@@ -165,8 +165,6 @@ static int __write_to_log_daemon(log_id_t log_id, struct iovec *vec, size_t nr)
     struct timespec ts;
     static __thread uint8_t drops = 0;
     size_t i, payload_size;
-    static const size_t header_size = sizeof_log_id_t + sizeof(tid) +
-                                      sizeof(log_time) + sizeof(drops);
     static uid_t last_uid = AID_ROOT; /* logd *always* starts up as AID_ROOT */
     static pid_t last_pid = (pid_t) -1;
     static atomic_int_fast32_t dropped;

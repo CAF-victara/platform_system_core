@@ -261,9 +261,3 @@ void LogTimeEntry::cleanSkip_Locked(void) {
         skipAhead[i] = 0;
     }
 }
-
-void LogTimeEntry::cleanSkip_Locked(void) {
-    for (log_id_t i = LOG_ID_MIN; i < LOG_ID_MAX; i = (log_id_t) (i + 1)) {
-        skipAhead[i] = 0;
-    }
-}
