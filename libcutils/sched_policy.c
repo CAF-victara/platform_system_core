@@ -205,9 +205,11 @@ static int getSchedulerGroup(int tid, char* buf, size_t bufLen)
 
 int get_sched_policy(int tid, SchedPolicy *policy)
 {
+#ifdef HAVE_GETTID
     if (tid == 0) {
         tid = gettid();
     }
+#endif
     pthread_once(&the_once, __initialize);
 
     if (__sys_supports_schedgroups) {
@@ -280,9 +282,11 @@ int set_cpuset_policy(int tid, SchedPolicy policy)
 
 int set_sched_policy(int tid, SchedPolicy policy)
 {
+#ifdef HAVE_GETTID
     if (tid == 0) {
         tid = gettid();
     }
+#endif
     policy = _policy(policy);
     pthread_once(&the_once, __initialize);
 
