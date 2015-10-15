@@ -114,16 +114,10 @@ static void sigpipe_handler(int n);
 static void install_sigpipe_handler();
 // END IKJB42MAIN-6672
 
-static void exit_top(int signal) {
-  exit(EXIT_FAILURE);
-}
-
 int top_main(int argc, char *argv[]) {
     install_sigpipe_handler(); // Motorola, a5705c, 2013-05-03, IKJB42MAIN-6672
 
     num_used_procs = num_free_procs = 0;
-
-    signal(SIGPIPE, exit_top);
 
     max_procs = 0;
     delay = 3;

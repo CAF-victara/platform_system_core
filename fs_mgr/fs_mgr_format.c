@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Motorola
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -213,17 +213,13 @@ static int format_ext4(char *fs_blkdev, char *fs_mnt_point, int needs_footer)
 
     /* Format the partition using the calculated length */
     reset_ext4fs_info();
-    info.len = off;
-    if (fs_blksize != INVALID_BLOCK_SIZE)
-        info.block_size = fs_blksize;
-    fd = open(fs_blkdev, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        ERROR("Cannot open block device for make_ext4fs.  %s\n",
-               strerror(errno));
-        return -1;
+    info.len = ((off64_t)nr_sec * 512);
+
+    /* Use make_ext4fs_internal to avoid wiping an already-wiped partition. */
+    rc = make_ext4fs_internal(fd, NULL, NULL, fs_mnt_point, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL);
+    if (rc) {
+        ERROR("make_ext4fs returned %d.\n", rc);
     }
-    rc = make_ext4fs_internal(fd, NULL, fs_mnt_point, 0, 0, 0, 0, 0, 0, 0,0, NULL);
-    INFO("make_ext4fs returned %d.\n", rc);
     close(fd);
 
     return rc;
@@ -257,7 +253,7 @@ static int format_f2fs(char *fs_blkdev, int needs_footer)
         }
         if (WIFEXITED(rc)) {
             rc = WEXITSTATUS(rc);
-            INFO("%s done, status %d", args[0], rc);
+            INFO("%s done, status %d\n", args[0], rc);
             if (rc) {
                 rc = -1;
             }

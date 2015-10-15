@@ -20,54 +20,69 @@
 #
 
 LOCAL_PATH:= $(call my-dir)
-include $(CLEAR_VARS)
 
-LOCAL_SRC_FILES:= \
-	builtins.c \
-	init.c \
-	devices.c \
-	property_service.c \
-	util.c \
-	parser.c \
-	keychords.c \
-	signal_handler.c \
-	init_parser.c \
-	ueventd.c \
-	ueventd_parser.c \
-	watchdogd.c
-
-LOCAL_CFLAGS    += -Wno-unused-parameter
-
-ifeq ($(strip $(INIT_BOOTCHART)),true)
-LOCAL_SRC_FILES += bootchart.c
-LOCAL_CFLAGS    += -DBOOTCHART=1
-endif
+# --
 
 ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
-LOCAL_CFLAGS += -DALLOW_LOCAL_PROP_OVERRIDE=1 -DALLOW_DISABLE_SELINUX=1
-LOCAL_CFLAGS += -DALLOW_CAMERA_DEBUG
-LOCAL_CFLAGS += -DLOAD_INIT_RC_FROM_PROP
+init_options += -DALLOW_LOCAL_PROP_OVERRIDE=1 -DALLOW_DISABLE_SELINUX=1
+init_options += -DALLOW_CAMERA_DEBUG
+init_options += -DLOAD_INIT_RC_FROM_PROP
 else
 # Allow disabling SELinux for not signed user buids
 ifneq ($(RADIO_SECURE),1)
-LOCAL_CFLAGS += -DALLOW_DISABLE_SELINUX=1
+init_options += -DALLOW_DISABLE_SELINUX=1
 endif
 endif
 
 ifeq ($(strip $(TARGET_USE_MOT_NEW_COM)),true)
-LOCAL_CFLAGS    += -DMOTO_NEW_CHARGE_ONLY_MODE
+init_options    += -DMOTO_NEW_CHARGE_ONLY_MODE
 endif
 
 # IKVOICE-4341 - Extend firmware loading folder list if XMCS codec is used for AOV
 ifeq ($(BOARD_HAS_AUDIO_DSP_XMCS),true)
-LOCAL_CFLAGS    += -DMOTO_AOV_WITH_XMCS
+init_options    += -DMOTO_AOV_WITH_XMCS
 endif
 
 # Enable ueventd logging
-#LOCAL_CFLAGS += -DLOG_UEVENTS=1
-ifdef DOLBY_UDC_MULTICHANNEL
-  LOCAL_CFLAGS += -DDOLBY_UDC_MULTICHANNEL
-endif #DOLBY_UDC_MULTICHANNEL
+#init_options += -DLOG_UEVENTS=1
+init_options += -DLOG_UEVENTS=0
+
+init_cflags += \
+    $(init_options) \
+    -Wall -Wextra \
+    -Wno-unused-parameter \
+    -Werror \
+
+init_clang := true
+
+# --
+
+include $(CLEAR_VARS)
+LOCAL_CPPFLAGS := $(init_cflags)
+LOCAL_SRC_FILES:= \
+    init_parser.cpp \
+    log.cpp \
+    parser.cpp \
+    util.cpp \
+
+LOCAL_STATIC_LIBRARIES := libbase
+LOCAL_MODULE := libinit
+LOCAL_CLANG := $(init_clang)
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_CPPFLAGS := $(init_cflags)
+LOCAL_SRC_FILES:= \
+    bootchart.cpp \
+    builtins.cpp \
+    devices.cpp \
+    init.cpp \
+    keychords.cpp \
+    property_service.cpp \
+    signal_handler.cpp \
+    ueventd.cpp \
+    ueventd_parser.cpp \
+    watchdogd.cpp \
 
 ifeq ($(TARGET_HAVE_VMWARE),true)
 LOCAL_CFLAGS += -DSUPPORT_VMW
@@ -76,23 +91,37 @@ endif
 ifdef DOLBY_DAP
 LOCAL_CFLAGS += -DDOLBY_DAP
 endif #DOLBY_DAP
+
+ifdef DOLBY_UDC_MULTICHANNEL
+  LOCAL_CFLAGS += -DDOLBY_UDC_MULTICHANNEL
+endif #DOLBY_UDC_MULTICHANNEL
+
 LOCAL_MODULE:= init
+LOCAL_C_INCLUDES += \
+    system/extras/ext4_utils \
+    system/core/mkbootimg
 
 LOCAL_FORCE_STATIC_EXECUTABLE := true
 LOCAL_MODULE_PATH := $(TARGET_ROOT_OUT)
 LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_UNSTRIPPED)
 
 LOCAL_STATIC_LIBRARIES := \
-	libfs_mgr \
-	liblogwrap \
-	libcutils \
-	liblog \
-	libc \
-	libselinux \
-	libmincrypt \
-	libext4_utils_static \
-	libsparse_static \
-	libz
+    libinit \
+    libfs_mgr \
+    libsquashfs_utils \
+    liblogwrap \
+    libcutils \
+    libbase \
+    libext4_utils_static \
+    libutils \
+    liblog \
+    libc \
+    libselinux \
+    libmincrypt \
+    libc++_static \
+    libdl \
+    libsparse_static \
+    libz
 
 LOCAL_ADDITIONAL_DEPENDENCIES += $(LOCAL_PATH)/Android.mk
 ifneq ($(strip $(TARGET_PLATFORM_DEVICE_BASE)),)
@@ -101,23 +130,27 @@ endif
 
 LOCAL_C_INCLUDES += external/zlib
 
+# Create symlinks
+LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
+    ln -sf ../init $(TARGET_ROOT_OUT)/sbin/ueventd; \
+    ln -sf ../init $(TARGET_ROOT_OUT)/sbin/watchdogd
+
+LOCAL_CLANG := $(init_clang)
 include $(BUILD_EXECUTABLE)
 
-# Make a symlink from /sbin/ueventd and /sbin/watchdogd to /init
-SYMLINKS := \
-	$(TARGET_ROOT_OUT)/sbin/ueventd \
-	$(TARGET_ROOT_OUT)/sbin/watchdogd
 
-$(SYMLINKS): INIT_BINARY := $(LOCAL_MODULE)
-$(SYMLINKS): $(LOCAL_INSTALLED_MODULE) $(LOCAL_PATH)/Android.mk
-	@echo "Symlink: $@ -> ../$(INIT_BINARY)"
-	@mkdir -p $(dir $@)
-	@rm -rf $@
-	$(hide) ln -sf ../$(INIT_BINARY) $@
 
-ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINKS)
 
-# We need this so that the installed files could be picked up based on the
-# local module name
-ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
-    $(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(SYMLINKS)
+include $(CLEAR_VARS)
+LOCAL_MODULE := init_tests
+LOCAL_SRC_FILES := \
+    init_parser_test.cpp \
+    util_test.cpp \
+
+LOCAL_SHARED_LIBRARIES += \
+    libcutils \
+    libbase \
+
+LOCAL_STATIC_LIBRARIES := libinit
+LOCAL_CLANG := $(init_clang)
+include $(BUILD_NATIVE_TEST)

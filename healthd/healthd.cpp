@@ -54,6 +54,7 @@ static struct healthd_config healthd_config = {
     .batteryCurrentAvgPath = String8(String8::kEmptyString),
     .batteryChargeCounterPath = String8(String8::kEmptyString),
     .energyCounter = NULL,
+    .boot_min_cap = 0,
     .screen_on = NULL,
 };
 
@@ -75,7 +76,6 @@ static struct itimerspec qe_itval;
 
 static int uevent_fd;
 static int wakealarm_fd;
-static int binder_fd;
 
 // -1 for no epoll timeout
 static int awake_poll_interval = -1;

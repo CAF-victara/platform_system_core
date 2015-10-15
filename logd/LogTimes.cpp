@@ -23,29 +23,27 @@
 
 pthread_mutex_t LogTimeEntry::timesLock = PTHREAD_MUTEX_INITIALIZER;
 
-const struct timespec LogTimeEntry::EPOCH = { 0, 1 };
-
 LogTimeEntry::LogTimeEntry(LogReader &reader, SocketClient *client,
                            bool nonBlock, unsigned long tail,
                            unsigned int logMask, pid_t pid,
-                           log_time start)
-        : mRefCount(1)
-        , mRelease(false)
-        , mError(false)
-        , threadRunning(false)
-        , mReader(reader)
-        , mLogMask(logMask)
-        , mPid(pid)
-        , mCount(0)
-        , mTail(tail)
-        , mIndex(0)
-        , mClient(client)
-        , mStart(start)
-        , mNonBlock(nonBlock)
-        , mEnd(CLOCK_MONOTONIC)
-{
-        pthread_cond_init(&threadTriggeredCondition, NULL);
-        cleanSkip_Locked();
+                           uint64_t start) :
+        mRefCount(1),
+        mRelease(false),
+        mError(false),
+        threadRunning(false),
+        leadingDropped(false),
+        mReader(reader),
+        mLogMask(logMask),
+        mPid(pid),
+        mCount(0),
+        mTail(tail),
+        mIndex(0),
+        mClient(client),
+        mStart(start),
+        mNonBlock(nonBlock),
+        mEnd(LogBufferElement::getCurrentSequence()) {
+    pthread_cond_init(&threadTriggeredCondition, NULL);
+    cleanSkip_Locked();
 }
 
 void LogTimeEntry::startReader_Locked(void) {
@@ -126,15 +124,18 @@ void *LogTimeEntry::threadStart(void *obj) {
 
     bool privileged = FlushCommand::hasReadLogs(client);
 
+    me->leadingDropped = true;
+
     lock();
 
     while (me->threadRunning && !me->isError_Locked()) {
-        log_time start = me->mStart;
+        uint64_t start = me->mStart;
 
         unlock();
 
         if (me->mTail) {
             logbuf.flushTo(client, start, privileged, FilterFirstPass, me);
+            me->leadingDropped = true;
         }
         start = logbuf.flushTo(client, start, privileged, FilterSecondPass, me);
 
@@ -161,13 +162,21 @@ void *LogTimeEntry::threadStart(void *obj) {
 }
 
 // A first pass to count the number of elements
-bool LogTimeEntry::FilterFirstPass(const LogBufferElement *element, void *obj) {
+int LogTimeEntry::FilterFirstPass(const LogBufferElement *element, void *obj) {
     LogTimeEntry *me = reinterpret_cast<LogTimeEntry *>(obj);
 
     LogTimeEntry::lock();
 
+    if (me->leadingDropped) {
+        if (element->getDropped()) {
+            LogTimeEntry::unlock();
+            return false;
+        }
+        me->leadingDropped = false;
+    }
+
     if (me->mCount == 0) {
-        me->mStart = element->getMonotonicTime();
+        me->mStart = element->getSequence();
     }
 
     if ((!me->mPid || (me->mPid == element->getPid()))
@@ -181,21 +190,28 @@ bool LogTimeEntry::FilterFirstPass(const LogBufferElement *element, void *obj) {
 }
 
 // A second pass to send the selected elements
-bool LogTimeEntry::FilterSecondPass(const LogBufferElement *element, void *obj) {
+int LogTimeEntry::FilterSecondPass(const LogBufferElement *element, void *obj) {
     LogTimeEntry *me = reinterpret_cast<LogTimeEntry *>(obj);
 
     LogTimeEntry::lock();
 
-    me->mStart = element->getMonotonicTime();
+    me->mStart = element->getSequence();
 
     if (me->skipAhead[element->getLogId()]) {
         me->skipAhead[element->getLogId()]--;
         goto skip;
     }
 
+    if (me->leadingDropped) {
+        if (element->getDropped()) {
+            goto skip;
+        }
+        me->leadingDropped = false;
+    }
+
     // Truncate to close race between first and second pass
     if (me->mNonBlock && me->mTail && (me->mIndex >= me->mCount)) {
-        goto skip;
+        goto stop;
     }
 
     if (!me->isWatching(element->getLogId())) {
@@ -207,7 +223,7 @@ bool LogTimeEntry::FilterSecondPass(const LogBufferElement *element, void *obj) 
     }
 
     if (me->isError_Locked()) {
-        goto skip;
+        goto stop;
     }
 
     if (!me->mTail) {
@@ -234,6 +250,16 @@ ok:
 skip:
     LogTimeEntry::unlock();
     return false;
+
+stop:
+    LogTimeEntry::unlock();
+    return -1;
+}
+
+void LogTimeEntry::cleanSkip_Locked(void) {
+    for (log_id_t i = LOG_ID_MIN; i < LOG_ID_MAX; i = (log_id_t) (i + 1)) {
+        skipAhead[i] = 0;
+    }
 }
 
 void LogTimeEntry::cleanSkip_Locked(void) {

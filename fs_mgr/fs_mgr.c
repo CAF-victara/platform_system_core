@@ -28,6 +28,10 @@
 #include <libgen.h>
 #include <time.h>
 #include <sys/swap.h>
+#include <dirent.h>
+#include <ext4.h>
+#include <ext4_sb.h>
+#include <ext4_crypt_init_extensions.h>
 
 #include <linux/loop.h>
 #include <private/android_filesystem_config.h>
@@ -38,6 +42,9 @@
 #include "mincrypt/rsa.h"
 #include "mincrypt/sha.h"
 #include "mincrypt/sha256.h"
+
+#include "ext4_utils.h"
+#include "wipe.h"
 
 #include "fs_mgr_priv.h"
 #include "fs_mgr_priv_verity.h"
@@ -150,13 +157,22 @@ static void check_fs(char *blk_device, char *fs_type, char *target)
          * filesytsem due to an error, e2fsck is still run to do a full check
          * fix the filesystem.
          */
-        if (force) {
-            INFO("Forcing full file sysyem check...\n");
-            e2fsck_argv[1] = "-yf";
-        } else {
-            ret = mount(blk_device, target, fs_type, tmpmnt_flags, tmpmnt_opts);
-            if (!ret) {
-                umount(target);
+        errno = 0;
+        ret = mount(blk_device, target, fs_type, tmpmnt_flags, tmpmnt_opts);
+        INFO("%s(): mount(%s,%s,%s)=%d: %s\n",
+             __func__, blk_device, target, fs_type, ret, strerror(errno));
+        if (!ret) {
+            int i;
+            for (i = 0; i < 5; i++) {
+                // Try to umount 5 times before continuing on.
+                // Should we try rebooting if all attempts fail?
+                int result = umount(target);
+                if (result == 0) {
+                    INFO("%s(): unmount(%s) succeeded\n", __func__, target);
+                    break;
+                }
+                ERROR("%s(): umount(%s)=%d: %s\n", __func__, target, result, strerror(errno));
+                sleep(1);
             }
         }
 
@@ -218,19 +234,22 @@ static void remove_trailing_slashes(char *n)
  * Mark the given block device as read-only, using the BLKROSET ioctl.
  * Return 0 on success, and -1 on error.
  */
-static void fs_set_blk_ro(const char *blockdev)
+int fs_mgr_set_blk_ro(const char *blockdev)
 {
     int fd;
+    int rc = -1;
     int ON = 1;
 
-    fd = open(blockdev, O_RDONLY);
+    fd = TEMP_FAILURE_RETRY(open(blockdev, O_RDONLY | O_CLOEXEC));
     if (fd < 0) {
         // should never happen
-        return;
+        return rc;
     }
 
-    ioctl(fd, BLKROSET, &ON);
+    rc = ioctl(fd, BLKROSET, &ON);
     close(fd);
+
+    return rc;
 }
 
 
@@ -256,7 +275,7 @@ static int __mount(const char *source, const char *target, const struct fstab_re
     ret = mount(source, target, rec->fs_type, mountflags, rec->fs_options);
     save_errno = errno;
     if ((ret == 0) && (mountflags & MS_RDONLY) != 0) {
-        fs_set_blk_ro(source);
+        fs_mgr_set_blk_ro(source);
     }
     errno = save_errno;
     return ret;
@@ -310,6 +329,261 @@ static int device_is_force_encrypted() {
     return strcmp(value, "1") ? 0 : 1;
 }
 
+/*
+ * Tries to mount any of the consecutive fstab entries that match
+ * the mountpoint of the one given by fstab->recs[start_idx].
+ *
+ * end_idx: On return, will be the last rec that was looked at.
+ * attempted_idx: On return, will indicate which fstab rec
+ *     succeeded. In case of failure, it will be the start_idx.
+ * Returns
+ *   -1 on failure with errno set to match the 1st mount failure.
+ *   0 on success.
+ */
+static int mount_with_alternatives(struct fstab *fstab, int start_idx, int *end_idx, int *attempted_idx)
+{
+    int i;
+    int mount_errno = 0;
+    int mounted = 0;
+
+    if (!end_idx || !attempted_idx || start_idx >= fstab->num_entries) {
+      errno = EINVAL;
+      if (end_idx) *end_idx = start_idx;
+      if (attempted_idx) *end_idx = start_idx;
+      return -1;
+    }
+
+    /* Hunt down an fstab entry for the same mount point that might succeed */
+    for (i = start_idx;
+         /* We required that fstab entries for the same mountpoint be consecutive */
+         i < fstab->num_entries && !strcmp(fstab->recs[start_idx].mount_point, fstab->recs[i].mount_point);
+         i++) {
+            /*
+             * Don't try to mount/encrypt the same mount point again.
+             * Deal with alternate entries for the same point which are required to be all following
+             * each other.
+             */
+            if (mounted) {
+                ERROR("%s(): skipping fstab dup mountpoint=%s rec[%d].fs_type=%s already mounted as %s.\n", __func__,
+                     fstab->recs[i].mount_point, i, fstab->recs[i].fs_type, fstab->recs[*attempted_idx].fs_type);
+                continue;
+            }
+
+            if (fstab->recs[i].fs_mgr_flags & MF_CHECK) {
+                check_fs(fstab->recs[i].blk_device, fstab->recs[i].fs_type,
+                         fstab->recs[i].mount_point);
+            }
+            if (!__mount(fstab->recs[i].blk_device, fstab->recs[i].mount_point, &fstab->recs[i])) {
+                *attempted_idx = i;
+                mounted = 1;
+                if (i != start_idx) {
+                    ERROR("%s(): Mounted %s on %s with fs_type=%s instead of %s\n", __func__,
+                         fstab->recs[i].blk_device, fstab->recs[i].mount_point, fstab->recs[i].fs_type,
+                         fstab->recs[start_idx].fs_type);
+                }
+            } else {
+                /* back up errno for crypto decisions */
+                mount_errno = errno;
+            }
+    }
+
+    /* Adjust i for the case where it was still withing the recs[] */
+    if (i < fstab->num_entries) --i;
+
+    *end_idx = i;
+    if (!mounted) {
+        *attempted_idx = start_idx;
+        errno = mount_errno;
+        return -1;
+    }
+    return 0;
+}
+
+static int translate_ext_labels(struct fstab_rec *rec)
+{
+    DIR *blockdir = NULL;
+    struct dirent *ent;
+    char *label;
+    size_t label_len;
+    int ret = -1;
+
+    if (strncmp(rec->blk_device, "LABEL=", 6))
+        return 0;
+
+    label = rec->blk_device + 6;
+    label_len = strlen(label);
+
+    if (label_len > 16) {
+        ERROR("FS label is longer than allowed by filesystem\n");
+        goto out;
+    }
+
+
+    blockdir = opendir("/dev/block");
+    if (!blockdir) {
+        ERROR("couldn't open /dev/block\n");
+        goto out;
+    }
+
+    while ((ent = readdir(blockdir))) {
+        int fd;
+        char super_buf[1024];
+        struct ext4_super_block *sb;
+
+        if (ent->d_type != DT_BLK)
+            continue;
+
+        fd = openat(dirfd(blockdir), ent->d_name, O_RDONLY);
+        if (fd < 0) {
+            ERROR("Cannot open block device /dev/block/%s\n", ent->d_name);
+            goto out;
+        }
+
+        if (TEMP_FAILURE_RETRY(lseek(fd, 1024, SEEK_SET)) < 0 ||
+            TEMP_FAILURE_RETRY(read(fd, super_buf, 1024)) != 1024) {
+            /* Probably a loopback device or something else without a readable
+             * superblock.
+             */
+            close(fd);
+            continue;
+        }
+
+        sb = (struct ext4_super_block *)super_buf;
+        if (sb->s_magic != EXT4_SUPER_MAGIC) {
+            INFO("/dev/block/%s not ext{234}\n", ent->d_name);
+            continue;
+        }
+
+        if (!strncmp(label, sb->s_volume_name, label_len)) {
+            char *new_blk_device;
+
+            if (asprintf(&new_blk_device, "/dev/block/%s", ent->d_name) < 0) {
+                ERROR("Could not allocate block device string\n");
+                goto out;
+            }
+
+            INFO("resolved label %s to %s\n", rec->blk_device, new_blk_device);
+
+            free(rec->blk_device);
+            rec->blk_device = new_blk_device;
+            ret = 0;
+            break;
+        }
+    }
+
+out:
+    closedir(blockdir);
+    return ret;
+}
+
+// Check to see if a mountable volume has encryption requirements
+static int handle_encryptable(struct fstab *fstab, const struct fstab_rec* rec)
+{
+    /* If this is block encryptable, need to trigger encryption */
+    if (   (rec->fs_mgr_flags & MF_FORCECRYPT)
+        || (device_is_force_encrypted() && fs_mgr_is_encryptable(rec))) {
+        if (umount(rec->mount_point) == 0) {
+            return FS_MGR_MNTALL_DEV_NEEDS_ENCRYPTION;
+        } else {
+            WARNING("Could not umount %s (%s) - allow continue unencrypted\n",
+                    rec->mount_point, strerror(errno));
+            return FS_MGR_MNTALL_DEV_NOT_ENCRYPTED;
+        }
+    }
+
+    // Deal with file level encryption
+    if (rec->fs_mgr_flags & MF_FILEENCRYPTION) {
+        // Default or not yet initialized encryption requires no more work here
+        if (!e4crypt_non_default_key(rec->mount_point)) {
+            INFO("%s is default file encrypted\n", rec->mount_point);
+            return FS_MGR_MNTALL_DEV_DEFAULT_FILE_ENCRYPTED;
+        }
+
+        INFO("%s is non-default file encrypted\n", rec->mount_point);
+
+        // Uses non-default key, so must unmount and set up temp file system
+        if (umount(rec->mount_point)) {
+            ERROR("Failed to umount %s - rebooting\n", rec->mount_point);
+            return FS_MGR_MNTALL_FAIL;
+        }
+
+        if (fs_mgr_do_tmpfs_mount(rec->mount_point) != 0) {
+            ERROR("Failed to mount a tmpfs at %s\n", rec->mount_point);
+            return FS_MGR_MNTALL_FAIL;
+        }
+
+        // Mount data temporarily so we can access unencrypted dir
+        char tmp_mnt[PATH_MAX];
+        strlcpy(tmp_mnt, rec->mount_point, sizeof(tmp_mnt));
+        strlcat(tmp_mnt, "/tmp_mnt", sizeof(tmp_mnt));
+        if (mkdir(tmp_mnt, 0700)) {
+            ERROR("Failed to create temp mount point\n");
+            return FS_MGR_MNTALL_FAIL;
+        }
+
+        if (fs_mgr_do_mount(fstab, rec->mount_point,
+                            rec->blk_device, tmp_mnt)) {
+            ERROR("Error temp mounting encrypted file system\n");
+            return FS_MGR_MNTALL_FAIL;
+        }
+
+        return FS_MGR_MNTALL_DEV_NON_DEFAULT_FILE_ENCRYPTED;
+    }
+
+    return FS_MGR_MNTALL_DEV_NOT_ENCRYPTED;
+}
+
+/*
+ * Reads the kernel cmdline to check if MDTP is activated.
+ * When MDTP is activated, kernel cmdline will have the word 'mdtp'.
+ */
+int fs_mgr_is_mdtp_activated()
+{
+      char cmdline[2048];
+      char *ptr;
+      int fd;
+      static int mdtp_activated = 0;
+      static int mdtp_activated_set = 0;
+
+      if (mdtp_activated_set) {
+          return mdtp_activated;
+      }
+
+      fd = open("/proc/cmdline", O_RDONLY);
+      if (fd >= 0) {
+          int n = read(fd, cmdline, sizeof(cmdline) - 1);
+          if (n < 0) n = 0;
+
+          /* get rid of trailing newline, it happens */
+          if (n > 0 && cmdline[n-1] == '\n') n--;
+
+          cmdline[n] = 0;
+          close(fd);
+      } else {
+          cmdline[0] = 0;
+      }
+
+      ptr = cmdline;
+      while (ptr && *ptr) {
+          char *x = strchr(ptr, ' ');
+          if (x != 0) *x++ = 0;
+          if (!strcmp(ptr,"mdtp")) {
+            mdtp_activated = 1;
+            break;
+          }
+          ptr = x;
+      }
+
+      mdtp_activated_set = 1;
+
+      return mdtp_activated;
+}
+
+/* When multiple fstab records share the same mount_point, it will
+ * try to mount each one in turn, and ignore any duplicates after a
+ * first successful mount.
+ * Returns -1 on error, and  FS_MGR_MNTALL_* otherwise.
+ */
 int fs_mgr_mount_all(struct fstab *fstab)
 {
     int i = 0, retry = MAX_MOUNT_RETRIES;
@@ -336,7 +610,16 @@ int fs_mgr_mount_all(struct fstab *fstab)
             continue;
         }
 
-        INFO("Mounting %s\n", fstab->recs[i].blk_device);
+        /* Translate LABEL= file system labels into block devices */
+        if (!strcmp(fstab->recs[i].fs_type, "ext2") ||
+            !strcmp(fstab->recs[i].fs_type, "ext3") ||
+            !strcmp(fstab->recs[i].fs_type, "ext4")) {
+            int tret = translate_ext_labels(&fstab->recs[i]);
+            if (tret < 0) {
+                ERROR("Could not translate label to block device\n");
+                continue;
+            }
+        }
 
         if (fstab->recs[i].fs_mgr_flags & MF_WAIT) {
             ret = wait_for_file(fstab->recs[i].blk_device, WAIT_TIMEOUT);
@@ -375,77 +658,74 @@ int fs_mgr_mount_all(struct fstab *fstab)
 
             ret = __mount(fstab->recs[i].blk_device, fstab->recs[i].mount_point, &fstab->recs[i]);
         }
-        mount_errno = errno;
 
-        /* Deal with encryptability. */
-        if (!ret) {
-            /* If this is encryptable, need to trigger encryption */
-            if (   (fstab->recs[i].fs_mgr_flags & MF_FORCECRYPT)
-                || (device_is_force_encrypted()
-                    && fs_mgr_is_encryptable(&fstab->recs[i]))) {
-                if (umount(fstab->recs[i].mount_point) == 0) {
-                    if (encryptable == FS_MGR_MNTALL_DEV_NOT_ENCRYPTED) {
-                        ERROR("Will try to encrypt %s with '%s'\n", fstab->recs[i].mount_point,
-                              fstab->recs[i].fs_type);
-                        encryptable = FS_MGR_MNTALL_DEV_NEEDS_ENCRYPTION;
-                    } else {
-                        ERROR("Only one encryptable/encrypted partition supported\n");
-                        encryptable = FS_MGR_MNTALL_DEV_MIGHT_BE_ENCRYPTED;
-                    }
-                } else {
-                    INFO("Could not umount %s - allow continue unencrypted\n",
-                         fstab->recs[i].mount_point);
-                    continue;
-                }
-            }
-            /* We have a fallback that we don't need, so disable it */
-            if (fstab->recs[i].fallback) {
-                fstab->recs[i].fallback->fs_mgr_flags |= MF_DISABLED;
-            }
-            /* Success!  Go get the next one */
-            INFO("Successfully mounted %s with file system type '%s'.\n",
-                        fstab->recs[i].mount_point, fstab->recs[i].fs_type);
-            retry = MAX_MOUNT_RETRIES;
-            continue;
-        }
-
-        /*
-         * Mount failed, which is expected in some circumstances for some
-         * partitions (userdata and cache).
-         */
-        if (ret && mount_errno != EBUSY && mount_errno != EACCES &&
-                IS_FORMATTABLE(&fstab->recs[i])) {
-            if (partition_wiped(fstab->recs[i].blk_device)) {
-                INFO("%s appears to be blank\n", fstab->recs[i].blk_device);
-                if (fs_mgr_do_format(&fstab->recs[i]) == 0) {
-                    INFO("Format complete; retrying mount.\n");
-                    i--;
-                    continue;
-                }
-                ERROR("Format failed; suggest recovery.\n");
-            } else if (fs_mgr_is_partition_encrypted(&fstab->recs[i])) {
-                INFO("%s appears to be encrypted\n", fstab->recs[i].blk_device);
-                /*
-                 * Need to mount a tmpfs at this mountpoint for now, and set
-                 * properties that Vold will query later for decrypting.
-                 */
-                if (fs_mgr_do_tmpfs_mount(fstab->recs[i].mount_point) < 0) {
-                    ++error_count;
-                    continue;
-                }
-                encryptable = FS_MGR_MNTALL_DEV_MIGHT_BE_ENCRYPTED;
+        if (fs_mgr_is_mdtp_activated() && ((fstab->recs[i].fs_mgr_flags & MF_FORCECRYPT) ||
+            device_is_force_encrypted())) {
+            INFO("%s(): mdtp activated, blkdev %s for mount %s type %s expected to be encrypted)\n",
+                 __func__, fstab->recs[i].blk_device, fstab->recs[i].mount_point,
+                 fstab->recs[i].fs_type);
+            if (fs_mgr_do_tmpfs_mount(fstab->recs[i].mount_point) < 0) {
+                ++error_count;
                 continue;
-            } else {
-                /*
-                 * Handle a transient error.  These can occur if the device had
-                 * a momentary lapse in sanity or the journal replay or roll-
-                 * forward recovery mechanism failed.  It's worth trying again,
-                 * since fsck may be able to recover things now that an error
-                 * bit is set in the superblock.
+            }
+
+            encryptable = FS_MGR_MNTALL_DEV_MIGHT_BE_ENCRYPTED;
+
+        } else {
+            int last_idx_inspected;
+            int top_idx = i;
+
+            mret = mount_with_alternatives(fstab, i, &last_idx_inspected, &attempted_idx);
+            i = last_idx_inspected;
+            mount_errno = errno;
+
+            /* Deal with encryptability. */
+            if (!mret) {
+                int status = handle_encryptable(fstab, &fstab->recs[attempted_idx]);
+
+                if (status == FS_MGR_MNTALL_FAIL) {
+                    /* Fatal error - no point continuing */
+                    return status;
+                }
+
+                if (status != FS_MGR_MNTALL_DEV_NOT_ENCRYPTED) {
+                    if (encryptable != FS_MGR_MNTALL_DEV_NOT_ENCRYPTED) {
+                        // Log and continue
+                        ERROR("Only one encryptable/encrypted partition supported\n");
+                    }
+                    encryptable = status;
+                }
+
+                /* Success!  Go get the next one */
+                continue;
+            }
+
+            /* mount(2) returned an error, handle the encryptable/formattable case */
+            bool wiped = partition_wiped(fstab->recs[top_idx].blk_device);
+            if (mret && mount_errno != EBUSY && mount_errno != EACCES &&
+                fs_mgr_is_formattable(&fstab->recs[top_idx]) && wiped) {
+                /* top_idx and attempted_idx point at the same partition, but sometimes
+                 * at two different lines in the fstab.  Use the top one for formatting
+                 * as that is the preferred one.
                  */
-                if (--retry > 0) {
-                    ERROR("Mount failed, retrying...\n");
-                    i--;
+                ERROR("%s(): %s is wiped and %s %s is formattable. Format it.\n", __func__,
+                      fstab->recs[top_idx].blk_device, fstab->recs[top_idx].mount_point,
+                      fstab->recs[top_idx].fs_type);
+                if (fs_mgr_is_encryptable(&fstab->recs[top_idx]) &&
+                    strcmp(fstab->recs[top_idx].key_loc, KEY_IN_FOOTER)) {
+                    int fd = open(fstab->recs[top_idx].key_loc, O_WRONLY, 0644);
+                    if (fd >= 0) {
+                        INFO("%s(): also wipe %s\n", __func__, fstab->recs[top_idx].key_loc);
+                        wipe_block_device(fd, get_file_size(fd));
+                        close(fd);
+                    } else {
+                        ERROR("%s(): %s wouldn't open (%s)\n", __func__,
+                              fstab->recs[top_idx].key_loc, strerror(errno));
+                    }
+                }
+                if (fs_mgr_do_format(&fstab->recs[top_idx]) == 0) {
+                    /* Let's replay the mount actions. */
+                    i = top_idx - 1;
                     continue;
                 }
                 /*
@@ -455,8 +735,35 @@ int fs_mgr_mount_all(struct fstab *fstab)
                  */
                  ERROR("Mount failed; suggest recovery.\n");
             }
-            encryptable = FS_MGR_MNTALL_DEV_NEEDS_RECOVERY;
-            continue;
+            if (mret && mount_errno != EBUSY && mount_errno != EACCES &&
+                fs_mgr_is_encryptable(&fstab->recs[attempted_idx])) {
+                if (wiped) {
+                    ERROR("%s(): %s is wiped and %s %s is encryptable. Suggest recovery...\n", __func__,
+                          fstab->recs[attempted_idx].blk_device, fstab->recs[attempted_idx].mount_point,
+                          fstab->recs[attempted_idx].fs_type);
+                    encryptable = FS_MGR_MNTALL_DEV_NEEDS_RECOVERY;
+                    continue;
+                } else {
+                    /* Need to mount a tmpfs at this mountpoint for now, and set
+                     * properties that vold will query later for decrypting
+                     */
+                    ERROR("%s(): possibly an encryptable blkdev %s for mount %s type %s )\n", __func__,
+                          fstab->recs[attempted_idx].blk_device, fstab->recs[attempted_idx].mount_point,
+                          fstab->recs[attempted_idx].fs_type);
+                    if (fs_mgr_do_tmpfs_mount(fstab->recs[attempted_idx].mount_point) < 0) {
+                        ++error_count;
+                        continue;
+                    }
+                }
+                encryptable = FS_MGR_MNTALL_DEV_MIGHT_BE_ENCRYPTED;
+            } else {
+                ERROR("Failed to mount an un-encryptable or wiped partition on"
+                       "%s at %s options: %s error: %s\n",
+                       fstab->recs[attempted_idx].blk_device, fstab->recs[attempted_idx].mount_point,
+                       fstab->recs[attempted_idx].fs_options, strerror(mount_errno));
+                ++error_count;
+                continue;
+            }
         }
 
         if (ret) {
